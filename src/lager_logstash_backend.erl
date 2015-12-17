@@ -187,8 +187,12 @@ connect({udp, Host, Port}) ->
     end.
 
 send({redis, Client, _Mref, Key}, Event) ->
-    {ok, _Count} = eredis:q(Client, ["RPUSH", Key, Event]),
-    ok;
+    case eredis:q(Client, ["RPUSH", Key, Event]) of
+        {ok, _Count} -> ok;
+        {error, no_connection} ->
+            error_logger:error_report([lager_logstash_backend, no_connection]),
+            ok
+    end;
 send({udp, Sock, Host, Port}, Event) ->
     gen_udp:send(Sock, Host, Port, Event);
 send({error, _}, _Event) ->
