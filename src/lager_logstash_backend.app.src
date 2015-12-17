@@ -5,7 +5,9 @@
   {applications, [
     kernel,
     stdlib,
-    lager
+
+    lager,
+    jiffy
   ]},
   {env, []}
 ]}.
