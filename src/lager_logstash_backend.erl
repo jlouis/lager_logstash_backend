@@ -170,12 +170,16 @@ encode_value(_Val, undefined) -> throw(encoding_error).
 %% Connect to the target
 connect({redis, Host, Port, Key}) ->
     {ok, _} = application:ensure_all_started(eredis),
-    case eredis:start_link(Host, Port) of
+    try eredis:start_link(Host, Port) of
         {ok, C} ->
             MRef = monitor(process, C),
             {redis, C, MRef, iolist_to_binary(Key)};
         {error, Err} ->
             {error, {redis, Err}}
+    catch
+        Class:Error ->
+            error_logger:error_report([cannot_connect_to_redis, Class, Error]),
+            {error, {redis, {Class, Error}}}
     end;
 connect({udp, Host, Port}) ->
     case inet:getaddr(Host, inet) of
