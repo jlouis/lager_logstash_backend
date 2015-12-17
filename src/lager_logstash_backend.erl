@@ -187,7 +187,7 @@ connect({udp, Host, Port}) ->
     end.
 
 send({redis, Client, _Mref, Key}, Event) ->
-    ok = redis:q(Client, ["RPUSH", Key, Event]),
+    ok = eredis:q(Client, ["RPUSH", Key, Event]),
     ok;
 send({udp, Sock, Host, Port}, Event) ->
     gen_udp:send(Sock, Host, Port, Event);
