@@ -7,7 +7,7 @@
     stdlib,
 
     lager,
-    jiffy
+    jsx
   ]},
   {env, []}
 ]}.

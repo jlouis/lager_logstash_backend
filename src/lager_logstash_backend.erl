@@ -116,20 +116,17 @@ code_change(_OldVsn, State, _Extra) ->
 
 encode_json_event(_, Node, NodeRole, NodeVersion, Severity, Date, Time, Message, Metadata) ->
   DateTime = io_lib:format("~sT~s", [Date,Time]),
-  jiffy:encode({[
-                {<<"fields">>, 
-                    {[
+  jsx:encode([{<<"fields">>, 
+                    [
                         {<<"level">>, Severity},
                         {<<"role">>, list_to_binary(NodeRole)},
                         {<<"role_version">>, list_to_binary(NodeVersion)},
                         {<<"node">>, Node}
-                    ] ++ Metadata }
-                },
+                    ] ++ Metadata },
                 {<<"@timestamp">>, list_to_binary(DateTime)}, %% use the logstash timestamp
                 {<<"message">>, safe_list_to_binary(Message)},
                 {<<"type">>, <<"erlang">>}
-            ]
-  }).
+            ]).
 
 safe_list_to_binary(L) when is_list(L) ->
   unicode:characters_to_binary(L);
