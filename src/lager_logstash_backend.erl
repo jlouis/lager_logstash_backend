@@ -16,12 +16,11 @@
          get_app_version/0
 ]).
 
--record(state, {socket :: pid(),
+-record(state, {connection ::
+		  {udp, port(), inet:ip_address(), inet:port_number()}
+		| {error, term()},
                 lager_level_type :: 'mask' | 'number' | 'unknown',
-                level :: atom(),
-                logstash_host :: string(),
-                logstash_port :: number(),
-                logstash_address :: inet:ip_address(),
+                level :: atom() | integer(),
                 node_role :: string(),
                 node_version :: string(),
                 metadata :: list()
@@ -43,8 +42,6 @@ init(Params) ->
     end,
 
   Level = lager_util:level_to_num(proplists:get_value(level, Params, debug)),
-  Host = proplists:get_value(logstash_host, Params, "localhost"),
-  Port = proplists:get_value(logstash_port, Params, 9125),
   Node_Role = proplists:get_value(node_role, Params, "no_role"),
   Node_Version = proplists:get_value(node_version, Params, "no_version"),
 
@@ -56,21 +53,12 @@ init(Params) ->
          {module, [{encoding, atom}]}
      ],
 
- {Socket, Address} =
-   case inet:getaddr(Host, inet) of
-     {ok, Addr} ->
-       {ok, Sock} = gen_udp:open(0, [list]),
-       {Sock, Addr};
-     {error, _Err} ->
-       {undefined, undefined}
-   end,
+  Connection = connect(proplists:get_value(connection, Params, undefined)),
 
-  {ok, #state{socket = Socket,
+
+  {ok, #state{connection = Connection,
               lager_level_type = Lager_Level_Type,
               level = Level,
-              logstash_host = Host,
-              logstash_port = Port,
-              logstash_address = Address,
               node_role = Node_Role,
               node_version = Node_Version,
               metadata = Metadata}}.
@@ -84,15 +72,14 @@ handle_call(get_loglevel, State) ->
 handle_call(_Request, State) ->
   {ok, ok, State}.
 
-handle_event({log, _}, #state{socket=S}=State) when S =:= undefined ->
+handle_event({log, _}, #state{connection={error, _Err}}=State) ->
   {ok, State};
 handle_event({log, {lager_msg, Q, Metadata, Severity, {Date, Time}, _, Message}}, State) ->
   handle_event({log, {lager_msg, Q, Metadata, Severity, {Date, Time}, Message}}, State);
-
-handle_event({log, {lager_msg, _, Metadata, Severity, {Date, Time}, Message}}, #state{level=L, metadata=Config_Meta}=State) ->
-  case lager_util:level_to_num(Severity) =< L of
-    true ->
-      Encoded_Message = encode_json_event(State#state.lager_level_type,
+handle_event({log, {lager_msg, _, Metadata, Severity, {Date, Time}, Message}}, #state{level=L, metadata=Config_Meta, connection = Conn }=State) ->
+    case guard_severity(Severity, L) of
+        log ->
+            JSONEvent =encode_json_event(State#state.lager_level_type,
                                                   node(),
                                                   State#state.node_role,
                                                   State#state.node_version,
@@ -101,24 +88,24 @@ handle_event({log, {lager_msg, _, Metadata, Severity, {Date, Time}, Message}}, #
                                                   Time,
                                                   Message,
                                                   metadata(Metadata, Config_Meta)),
-      gen_udp:send(State#state.socket,
-                   State#state.logstash_address,
-                   State#state.logstash_port,
-                   Encoded_Message);
-    _ ->
-      ok
-  end,
-  {ok, State};
-
+            send(Conn, JSONEvent);
+        skip ->
+           ok
+    end,
+    {ok, State};
 handle_event(_Event, State) ->
   {ok, State}.
 
+handle_info({'DOWN', MRef, process, Pid, _Reason},
+  #state { connection = {redis, Pid, MRef, _}}) ->
+    error_logger:error_report([reaping_event_handler, redis_is_down]),
+    remove_handler;
 handle_info(_Info, State) ->
   {ok, State}.
 
-terminate(_Reason, #state{socket=S}=_State) ->
-  gen_udp:close(S),
-  ok;
+terminate(_Reason, #state{connection=Conn}=_State) ->
+    close(Conn),
+    ok;
 terminate(_Reason, _State) ->
   ok.
 
@@ -127,14 +114,14 @@ code_change(_OldVsn, State, _Extra) ->
   Vsn = get_app_version(),
   {ok, State#state{node_version=Vsn}}.
 
-encode_json_event(_, Node, Node_Role, Node_Version, Severity, Date, Time, Message, Metadata) ->
+encode_json_event(_, Node, NodeRole, NodeVersion, Severity, Date, Time, Message, Metadata) ->
   DateTime = io_lib:format("~sT~s", [Date,Time]),
   jiffy:encode({[
                 {<<"fields">>, 
                     {[
                         {<<"level">>, Severity},
-                        {<<"role">>, list_to_binary(Node_Role)},
-                        {<<"role_version">>, list_to_binary(Node_Version)},
+                        {<<"role">>, list_to_binary(NodeRole)},
+                        {<<"role_version">>, list_to_binary(NodeVersion)},
                         {<<"node">>, Node}
                     ] ++ Metadata }
                 },
@@ -179,3 +166,47 @@ encode_value(Val, process) when is_atom(Val) -> list_to_binary(atom_to_list(Val)
 encode_value(Val, integer) -> list_to_binary(integer_to_list(Val));
 encode_value(Val, atom) -> list_to_binary(atom_to_list(Val));
 encode_value(_Val, undefined) -> throw(encoding_error).
+
+%% Connect to the target
+connect({redis, Host, Port, Key}) ->
+    {ok, _} = application:ensure_all_started(eredis),
+    case eredis:start_link(Host, Port) of
+        {ok, C} ->
+            MRef = monitor(process, C),
+            {redis, C, MRef, iolist_to_binary(Key)};
+        {error, Err} ->
+            {error, {redis, Err}}
+    end;
+connect({udp, Host, Port}) ->
+    case inet:getaddr(Host, inet) of
+        {ok, Addr} ->
+            {ok, Sock} = gen_udp:open(0, [list]),
+            {udp, Sock, Addr, Port};
+        {error, Err} ->
+            {error, {udp, Err}}
+    end.
+
+send({redis, Client, _Mref, Key}, Event) ->
+    ok = redis:q(Client, ["RPUSH", Key, Event]),
+    ok;
+send({udp, Sock, Host, Port}, Event) ->
+    gen_udp:send(Sock, Host, Port, Event);
+send({error, _}, _Event) ->
+    ok.
+
+close({udp, Sock, _,_}) ->
+    gen_udp:close(Sock);
+close({redis, C, MRef}) ->
+    demonitor(MRef, [flush]),
+    ok = eredis:stop(C),
+    ok;
+close({error, _}) ->
+    ok.
+
+
+%% Check if we should log a given severity at a given level.
+guard_severity(Severity, L) ->
+    case lager_util:level_to_num(Severity) =< L of
+        true -> log;
+        false -> skip
+    end.
