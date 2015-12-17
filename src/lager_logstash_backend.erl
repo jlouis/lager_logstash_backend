@@ -190,7 +190,7 @@ send({redis, Client, _Mref, Key}, Event) ->
     case eredis:q(Client, ["RPUSH", Key, Event]) of
         {ok, _Count} -> ok;
         {error, no_connection} ->
-            error_logger:error_report([lager_logstash_backend, no_connection]),
+            %% Cannot log here, would loop
             ok
     end;
 send({udp, Sock, Host, Port}, Event) ->
